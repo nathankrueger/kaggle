@@ -1,0 +1,4 @@
+**/*/*.zip
+**/*/tensorboard_logs
+**/*/*_model
+**/*/test_submission.csv

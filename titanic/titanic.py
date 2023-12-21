@@ -28,8 +28,9 @@ def get_encoded_ticket(ticketstr: str) -> int:
         for part in parts:
             if isint(part):
                 result += int(part)
+        return result
 
-def get_dataset(csv_path):
+def parse_dataset(csv_path):
     result = []
     with open(csv_path, 'r') as fh:
         lines = fh.readlines()
@@ -48,7 +49,6 @@ def get_dataset(csv_path):
             plcass_offset = 1 if test_data else 2
 
             id = int(row[0])
-            print(id)
             if not test_data:
                 survived = int(row[1])
             else:
@@ -61,7 +61,7 @@ def get_dataset(csv_path):
             sibsp = int(row[plcass_offset + 5])
             parch = int(row[plcass_offset + 6])
             ticket = get_encoded_ticket(row[plcass_offset + 7])
-            fare = int(float(row[plcass_offset + 8])) if len(row[plcass_offset + 4]) > 0 else DEFAULT_FARE
+            fare = int(float(row[plcass_offset + 8])) if len(row[plcass_offset + 8]) > 0 else DEFAULT_FARE
             cabin = row[plcass_offset + 9]
             embarked = EMBARKMENT_DICT[row[plcass_offset + 10].strip()]
             
@@ -83,11 +83,9 @@ def get_dataset(csv_path):
             
     return result
 
-if __name__ == '__main__':
-    ds = get_dataset(train_csv)
-
+def prepare_dataset_for_model(ds):
     int_inputs = []
-    outputs = []
+    int_outputs = []
     for passenger in ds:
         int_inputs.append(
             [
@@ -97,44 +95,85 @@ if __name__ == '__main__':
                 passenger['sibsp'],
                 passenger['parch'],
                 passenger['embarked'],
-                passenger['ticket'],
-                passenger['fare']
+               # passenger['ticket'],
+               # passenger['fare']
             ]
         )
-        outputs.append(passenger['survived'])
+        int_outputs.append(passenger['survived'])
 
-    outputs = np.array(outputs)
+    int_outputs = np.array(int_outputs)
+    int_inputs = np.array(int_inputs)
+    return int_inputs, int_outputs
+
+if __name__ == '__main__':
+    train_ds = parse_dataset(train_csv)
+    int_inputs, int_outputs = prepare_dataset_for_model(train_ds)
 
     # set aside validation data
     val_percentage = .3
     total_inputs = len(int_inputs)
     num_val = int(val_percentage * total_inputs)
     num_train = total_inputs - num_val
-    train_inputs = int_inputs[:num_train]
-    train_inputs = np.array(train_inputs)
-    val_inputs = int_inputs[num_train:]
-    val_inputs = np.array(val_inputs)
 
-    inputs = keras.Input(shape=(len(int_inputs[0]),), dtype=tf.int32)
-    x = keras.layers.Dense(32, activation='relu')(inputs)
-    x = keras.layers.Dense(16, activation='relu')(x)
-    outputs = keras.layers.Dense(1, activation='softmax')(x)
+    train_inputs = int_inputs[:num_train]
+    train_outputs = int_outputs[:num_train]
+    train_inputs = np.array(train_inputs).astype('float32')
+    train_outputs = np.array(train_outputs).astype('float32')
+
+    val_inputs = int_inputs[num_train:]
+    val_outputs = int_outputs[num_train:]
+    val_inputs = np.array(val_inputs).astype('float32')
+    val_outputs = np.array(val_outputs).astype('float32')
+
+    x = inputs = keras.Input(shape=(len(int_inputs[0]),), dtype='float32')
+    #x = keras.layers.Dense(256, activation='relu')(x)
+    x = keras.layers.Dense(128, activation='relu')(x)
+    x = keras.layers.Dense(64, activation='relu')(x)
+    x = keras.layers.Dense(32, activation='relu')(x)
+    x = keras.layers.Dropout(0.5)(x)
+    outputs = keras.layers.Dense(1, activation='sigmoid')(x)
     model = keras.Model(inputs, outputs)
 
     model.compile(
-        optimizer='rmsprop',
+        optimizer=keras.optimizers.RMSprop(learning_rate=0.001),
         loss='binary_crossentropy',
         metrics=['accuracy']
     )
 
     print(model.summary())
+    model_path = str(base_dir / 'titanic_model')
 
-    history = model.fit(
-        x=train_inputs,
-        y=outputs,
-        validation_data=val_inputs,
-        epochs=50,
-        callbacks=[
-            keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs'))
-        ]
-    )
+    try:
+        history = model.fit(
+            batch_size=32,
+            x=train_inputs,
+            y=train_outputs,
+            validation_data=(val_inputs, val_outputs),
+            epochs=100,
+            callbacks=[
+                keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs')),
+                keras.callbacks.ModelCheckpoint(
+                    save_best_only=True,
+                    filepath=model_path
+                ),
+                keras.callbacks.ReduceLROnPlateau(
+                    patience=8,
+                    factor=0.5
+                )
+            ]
+        )
+    except KeyboardInterrupt:
+        print(os.linesep)
+
+    best_model = keras.models.load_model(model_path)
+
+    test_id_offset = 892
+    test_ds = parse_dataset(test_csv)
+    test_inputs, int_outputs = prepare_dataset_for_model(test_ds)
+    predictions = model.predict(test_inputs)
+
+    # write output csv
+    with open(base_dir / 'test_submission.csv', 'w') as fh:
+        fh.write('PassengerId,Survived\n')
+        for idx, pred in enumerate(predictions):
+            fh.write(f'{idx + test_id_offset},{1 if pred[0] >= 0.5 else 0}\n')
