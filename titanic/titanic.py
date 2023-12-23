@@ -122,14 +122,14 @@ class TitanicHyperModel(kt.HyperModel):
 
     def build(self, hp: kt.HyperParameters) -> keras.Model:
         # hyperparams to test
-        units = hp.Int(name='units', min_value=64, max_value=256, step=32, default=192)
-        layers = hp.Int(name='layers', min_value=2, max_value=5, step=1, default=4)
-        activation = hp.Choice(name='activation', values=['tanh', 'relu'], default='tanh')
-        layer_size_reduction = hp.Choice('layer_size_reduction_scheme', values=[0.5, 0.3], default=0.3)
-        layer_reduction_period = hp.Choice('layer_reduction_period', values=[1, 2], default=1)
-        optimizer = hp.Choice(name='optimizer', values=['adam', 'rmsprop'], default='adam')
+        units = hp.Int(name='units', min_value=64, max_value=256, step=16)
+        layers = hp.Int(name='layers', min_value=2, max_value=5, step=1)
+        activation = hp.Choice(name='activation', values=['tanh', 'relu'])
+        layer_size_reduction = hp.Choice('layer_size_reduction_scheme', values=[0.8, 0.5, 0.3])
+        layer_reduction_period = hp.Choice('layer_reduction_period', values=[1, 2])
+        optimizer = hp.Choice(name='optimizer', values=['adam', 'rmsprop'])
         use_dropout = hp.Boolean(name='use_dropout', default=True)
-        l2_regularization_val = hp.Choice(name='l2_regularization', values=[0.0, 0.001, 0.002, 0.003], default=0.0)
+        l2_regularization_val = hp.Choice(name='l2_regularization', values=[0.0, 0.001, 0.002, 0.004, 0.008])
 
         if l2_regularization_val > 0.0:
             l2_regularization = keras.regularizers.l2(l2_regularization_val)
@@ -165,13 +165,13 @@ class TitanicHyperModel(kt.HyperModel):
 """
 Train a simple model with fixed architecture
 """
-def run_single_model(train_inputs, train_outputs, use_regularization=False, use_dropout=False) -> keras.Model:
+def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_regularization=False, use_dropout=False) -> keras.Model:
     # multi-layer perceptron
     x = inputs = keras.Input(shape=(len(train_inputs[0]),), dtype='float32')
-    x = keras.layers.Dense(96, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
-    x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
-    #x = keras.layers.Dense(64, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
-    #x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001 if use_regularization else None))(x)
+    x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(64, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
+    x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001 if use_regularization else None))(x)
     if use_dropout:
         x = keras.layers.Dropout(0.5)(x)
     outputs = keras.layers.Dense(1, activation='sigmoid')(x)
@@ -189,7 +189,7 @@ def run_single_model(train_inputs, train_outputs, use_regularization=False, use_
     # train the model
     try:
          history = model.fit(
-            batch_size=48,
+            batch_size=64,
             validation_split=0.3,
             x=train_inputs,
             y=train_outputs,
@@ -199,14 +199,16 @@ def run_single_model(train_inputs, train_outputs, use_regularization=False, use_
                 keras.callbacks.ModelCheckpoint(
                     save_best_only=True,
                     filepath=model_path,
-                    #monitor='val_accuracy'
+                    monitor=monitor
                 ),
                 keras.callbacks.ReduceLROnPlateau(
-                    patience=15,
-                    factor=0.6
+                    patience=5,
+                    factor=0.6,
+                    monitor=monitor
                 ),
                 keras.callbacks.EarlyStopping(
-                    patience=30
+                    patience=50,
+                    monitor=monitor
                 )
             ]
         )
@@ -222,20 +224,46 @@ Use keras-tuner to sweep across hyperparameter space and determine the best
 configuration hyperparameters for a performant model.
 See: https://keras.io/guides/keras_tuner/getting_started/
 """
-def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=400, monitor: str='val_accuracy') -> keras.Model:
+def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=400, monitor: str='val_accuracy', tuner_type: str='random') -> keras.Model:
     hypermodel = TitanicHyperModel(len(train_inputs[0]))
-    val_split = 0.3
-    batch_sz = 48
-    epochs = 300
 
-    tuner = kt.tuners.BayesianOptimization(
-        hypermodel=hypermodel,
-        objective=monitor,
-        max_trials=max_trials,
-        executions_per_trial=1,
-        directory=base_dir / 'titanic_hypertuning',
-        overwrite=True
-    )
+    execution_per_trial = 2
+    epochs = 300
+    val_split = 0.3
+    batch_sz = 32
+    early_stopping_patience = 20
+    reduce_lr_patience = 6
+    reduce_lr_factor = 0.6
+
+    if tuner_type == 'bayesian':
+        tuner = kt.tuners.BayesianOptimization(
+            hypermodel=hypermodel,
+            objective=monitor,
+            max_trials=max_trials,
+            executions_per_trial=execution_per_trial,
+            directory=base_dir / 'titanic_hypertuning',
+            overwrite=True
+        )
+    elif tuner_type == 'random':
+        tuner = kt.tuners.RandomSearch(
+            hypermodel=hypermodel,
+            objective=monitor,
+            max_trials=max_trials,
+            executions_per_trial=execution_per_trial,
+            directory=base_dir / 'titanic_hypertuning',
+            overwrite=True
+        )
+    elif tuner_type == 'grid':
+        tuner = kt.tuners.GridSearch(
+            hypermodel=hypermodel,
+            objective=monitor,
+            max_trials=max_trials,
+            executions_per_trial=execution_per_trial,
+            directory=base_dir / 'titanic_hypertuning',
+            overwrite=True            
+        )
+    else:
+        raise Exception('Unsupported tuner type specified.')
 
     print(tuner.search_space_summary())
 
@@ -248,12 +276,12 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
             callbacks=[
                 keras.callbacks.ReduceLROnPlateau(
                     monitor=monitor,
-                    patience=8,
-                    factor=0.6
+                    patience=reduce_lr_patience,
+                    factor=reduce_lr_factor
                 ),
                 keras.callbacks.EarlyStopping(
                     monitor=monitor,
-                    patience=15
+                    patience=early_stopping_patience
                 )
             ],
             batch_size=batch_sz
@@ -278,12 +306,12 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
         callbacks=[
             keras.callbacks.ReduceLROnPlateau(
                 monitor=monitor,
-                patience=8,
-                factor=0.6
+                patience=reduce_lr_patience,
+                factor=reduce_lr_factor
             ),
             keras.callbacks.EarlyStopping(
                 monitor=monitor,
-                patience=15
+                patience=early_stopping_patience
             )
         ],
         batch_size=batch_sz
@@ -302,8 +330,21 @@ if __name__ == '__main__':
     train_inputs = np.array(numeric_inputs).astype('float32')
     train_outputs = np.array(numeric_outputs).astype('float32')
 
-    #model = run_keras_tuner_on_hypermodel(train_inputs, train_outputs, monitor='val_loss', max_trials=128)
-    model = run_single_model(train_inputs, train_outputs, use_dropout=False, use_regularization=False)
+    model = run_keras_tuner_on_hypermodel(
+        train_inputs,
+        train_outputs,
+        monitor='val_accuracy',
+        tuner_type='random',
+        max_trials=4096
+    )
+
+    # model = run_single_model(
+    #     train_inputs,
+    #     train_outputs,
+    #     monitor='val_accuracy',
+    #     use_dropout=True,
+    #     use_regularization=False
+    # )
   
     # make the predictions
     test_ds = parse_dataset(test_csv)
