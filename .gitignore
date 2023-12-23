@@ -1,4 +1,5 @@
 **/*/*.zip
 **/*/tensorboard_logs
 **/*/*_model
+titanic/titanic_hypertuning
 **/*/test_submission.csv
