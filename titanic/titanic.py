@@ -1,6 +1,7 @@
 import keras
 import kerastuner as kt
 import numpy as np
+from sklearn.model_selection import KFold
 import os
 import random
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 base_dir = Path(os.path.dirname(__file__))
 train_csv = base_dir / 'train.csv'
 test_csv = base_dir / 'test.csv'
+model_path = str(base_dir / 'titanic_model')
 
 CABIN_LETTER_DICT = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, None: 8}
 NAME_PREFIX_DICT = {'Mrs.': 1, 'Miss': 2, 'Mr.': 3, 'Dr.': 4, None: 5}
@@ -16,6 +18,7 @@ DEFAULT_AGE = 0.0
 
 # avg age in training data: 29.69, with 177 missing entries
 # avg age in test data: 30.27, with 86 missing entries
+# 68% of train.csv survivors are female, this is a good common-sense baseline
 
 def parse_dataset(csv_path):
     result = []
@@ -117,8 +120,9 @@ def generate_output_csv(csv_filename, predictions, offset):
             fh.write(f'{idx + offset},{1 if pred[0] >= 0.5 else 0}\n')
 
 class TitanicHyperModel(kt.HyperModel):
-    def __init__(self, num_inputs: int):
+    def __init__(self, num_inputs: int, kfolds: int=1):
         self.num_inputs = num_inputs
+        self.kfolds = kfolds
 
     def build(self, hp: kt.HyperParameters) -> keras.Model:
         # hyperparams to test
@@ -161,6 +165,28 @@ class TitanicHyperModel(kt.HyperModel):
         )
 
         return model
+        
+    def fit(self, hp, model, *args, **kwargs):
+        if self.kfolds > 1:
+            histories = []
+            inputs = kwargs['x']
+            outputs = kwargs['y']
+            for train, validation in KFold(n_splits=self.kfolds).split(inputs, outputs):
+                kwargs['x'] = inputs[train]
+                kwargs['y'] = outputs[train]
+                kwargs['validation_data'] = (inputs[validation], outputs[validation])
+                if 'validation_split' in kwargs:
+                    del kwargs['validation_split']
+                histories.append(super().fit(hp, model, *args, **kwargs))
+
+            # build a combined history by adding values from each fold...
+            result = histories[0]
+            for hist in histories[1:]:
+                for key in result.history:
+                    result.history[key] += hist.history[key]
+            return result
+        else:
+            return super().fit(hp, model, *args, **kwargs)
 
 """
 Train a simple model with fixed architecture
@@ -184,11 +210,10 @@ def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_re
     )
 
     print(model.summary())
-    model_path = str(base_dir / 'titanic_model')
 
     # train the model
     try:
-         history = model.fit(
+        history = model.fit(
             batch_size=64,
             validation_split=0.3,
             x=train_inputs,
@@ -215,7 +240,7 @@ def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_re
     except KeyboardInterrupt:
         print(os.linesep)
 
-    # load in the best performing model
+    # load in the best performing model weights
     best_model = keras.models.load_model(model_path)
     return best_model
 
@@ -225,9 +250,9 @@ configuration hyperparameters for a performant model.
 See: https://keras.io/guides/keras_tuner/getting_started/
 """
 def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=400, monitor: str='val_accuracy', tuner_type: str='random') -> keras.Model:
-    hypermodel = TitanicHyperModel(len(train_inputs[0]))
+    hypermodel = TitanicHyperModel(len(train_inputs[0]), kfolds=5)
 
-    execution_per_trial = 2
+    execution_per_trial = 1
     epochs = 300
     val_split = 0.3
     batch_sz = 32
@@ -312,13 +337,20 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
             keras.callbacks.EarlyStopping(
                 monitor=monitor,
                 patience=early_stopping_patience
+            ),
+            keras.callbacks.ModelCheckpoint(
+                save_best_only=True,
+                filepath=model_path,
+                monitor=monitor
             )
         ],
         batch_size=batch_sz
     )
 
-    return best_model
-    
+    # load in the best performing model weights
+    best_model = keras.models.load_model(model_path)
+    return best_model   
+
 if __name__ == '__main__':
     # parse & collect the training data in a usable format
     train_ds = parse_dataset(train_csv)
