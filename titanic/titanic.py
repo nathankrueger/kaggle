@@ -165,7 +165,39 @@ class TitanicHyperModel(kt.HyperModel):
         )
 
         return model
+    
+    def __get_average_metric_values(self, histories):
+        best_results = {}
+        total_epochs = 0
+        for hist in histories:
+            total_epochs += len(hist.epoch)
+            for key in hist.history:
+                if 'accuracy' in key:
+                    if not key in best_results:
+                        best_results[key] = []
+                    best_results[key].append(np.amax(hist.history[key]))
+                elif 'loss' in key:
+                    if not key in best_results:
+                        best_results[key] = []
+                    best_results[key].append(np.amin(hist.history[key]))
+
+        best_results_avg = {}
+        for key in best_results:
+            best_results_avg[key] = np.mean(best_results[key])
         
+        result = histories[0]
+        for key in result.history:
+            if key in best_results_avg:
+                # this is destroying history -- just repeat the averaged value to keep the lists of the correct order,
+                # and to direct the hypertuning to use the result of k-fold validation across multiple train / test splits
+                result.history[key] = [best_results_avg[key]] * total_epochs
+            else:
+                # this is destroying history -- just repeat 'something' valid to keep the lists of the correct order
+                result.history[key] = [result.history[key][0]] * total_epochs
+        
+        result.epoch = range(1, total_epochs + 1)
+        return result
+
     def fit(self, hp, model, *args, **kwargs):
         if self.kfolds > 1:
             histories = []
@@ -179,12 +211,8 @@ class TitanicHyperModel(kt.HyperModel):
                     del kwargs['validation_split']
                 histories.append(super().fit(hp, model, *args, **kwargs))
 
-            # build a combined history by adding values from each fold...
-            result = histories[0]
-            for hist in histories[1:]:
-                for key in result.history:
-                    result.history[key] += hist.history[key]
-            return result
+            # build a combined history by averaging values from each fold...
+            return self.__get_average_metric_values(histories)
         else:
             return super().fit(hp, model, *args, **kwargs)
 
@@ -249,11 +277,19 @@ Use keras-tuner to sweep across hyperparameter space and determine the best
 configuration hyperparameters for a performant model.
 See: https://keras.io/guides/keras_tuner/getting_started/
 """
-def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=400, monitor: str='val_accuracy', tuner_type: str='random') -> keras.Model:
-    hypermodel = TitanicHyperModel(len(train_inputs[0]), kfolds=5)
+def run_keras_tuner_on_hypermodel(
+    train_inputs,
+    train_outputs,
+    overridden_hp: kt.HyperParameters=None,
+    epochs: int=300,
+    kfolds: int=3,
+    max_trials: int=400,
+    monitor: str='val_accuracy',
+    tuner_type: str='random'
+) -> keras.Model:
 
+    hypermodel = TitanicHyperModel(len(train_inputs[0]), kfolds=kfolds)
     execution_per_trial = 1
-    epochs = 300
     val_split = 0.3
     batch_sz = 32
     early_stopping_patience = 20
@@ -267,7 +303,8 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
             max_trials=max_trials,
             executions_per_trial=execution_per_trial,
             directory=base_dir / 'titanic_hypertuning',
-            overwrite=True
+            overwrite=True,
+            hyperparameters=overridden_hp
         )
     elif tuner_type == 'random':
         tuner = kt.tuners.RandomSearch(
@@ -276,7 +313,8 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
             max_trials=max_trials,
             executions_per_trial=execution_per_trial,
             directory=base_dir / 'titanic_hypertuning',
-            overwrite=True
+            overwrite=True,
+            hyperparameters=overridden_hp
         )
     elif tuner_type == 'grid':
         tuner = kt.tuners.GridSearch(
@@ -285,7 +323,8 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
             max_trials=max_trials,
             executions_per_trial=execution_per_trial,
             directory=base_dir / 'titanic_hypertuning',
-            overwrite=True            
+            overwrite=True,
+            hyperparameters=overridden_hp
         )
     else:
         raise Exception('Unsupported tuner type specified.')
@@ -349,7 +388,12 @@ def run_keras_tuner_on_hypermodel(train_inputs, train_outputs, max_trials: int=4
 
     # load in the best performing model weights
     best_model = keras.models.load_model(model_path)
-    return best_model   
+
+    # evaluate on training data to confirm loading in the 'best' model was effective
+    print(os.linesep + 'Evaluating best model...')
+    best_model.evaluate(train_inputs, train_outputs)
+
+    return best_model
 
 if __name__ == '__main__':
     # parse & collect the training data in a usable format
@@ -362,12 +406,19 @@ if __name__ == '__main__':
     train_inputs = np.array(numeric_inputs).astype('float32')
     train_outputs = np.array(numeric_outputs).astype('float32')
 
+    overridden_hp = kt.HyperParameters()
+    overridden_hp.Fixed('activation', 'tanh')
+    overridden_hp.Int(name='layers', min_value=3, max_value=5, step=1)
+
     model = run_keras_tuner_on_hypermodel(
         train_inputs,
         train_outputs,
         monitor='val_accuracy',
         tuner_type='random',
-        max_trials=4096
+        max_trials=4096,
+        kfolds=3,
+        epochs=100,
+        overridden_hp=overridden_hp
     )
 
     # model = run_single_model(
@@ -382,5 +433,6 @@ if __name__ == '__main__':
     test_ds = parse_dataset(test_csv)
     test_id_offset = int(test_ds[0]['id'])
     test_inputs, numeric_outputs = prepare_dataset_for_model(test_ds)
+    print(os.linesep + 'Predicting test outputs...')
     predictions = model.predict(test_inputs)
     generate_output_csv('test_submission.csv', predictions, test_id_offset)
