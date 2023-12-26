@@ -2,6 +2,10 @@ import keras
 import kerastuner as kt
 import numpy as np
 from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+import pandas as pd
 import os
 import random
 from pathlib import Path
@@ -57,6 +61,57 @@ def parse_dataset(csv_path):
             })
             
     return result
+
+def random_forest_solution(train_inputs, train_outputs):
+    train_features, validation_features, train_labels, validation_labels = train_test_split(
+                                                                    train_inputs,
+                                                                    train_outputs,
+                                                                    test_size=0.25,
+                                                                    random_state=42
+                                                                )
+
+    max_acc = [0.0]
+    max_acc_params = None, None
+
+    try:
+        for n_estimators in [10,20,30,40,50,100,150,200,250,500,1000,1500,2000,2500,5000,10000]:
+            for max_depth in [2,3,4,5,10,15,20,25]:
+                for train, validation in KFold(n_splits=self.kfolds).split(inputs, outputs):
+                    rando_trees = RandomForestClassifier(
+                        n_estimators=n_estimators,
+                        max_depth=max_depth,
+                        random_state=1337
+                    )
+                    rando_trees.fit(train_features, train_labels)
+                    rando_trees.predict(validation_features)
+
+                    predictions = rando_trees.predict(validation_features)
+
+                    acc = accuracy_score(predictions, validation_labels)
+                    print(f'[n_estimators:{n_estimators}, max_depth:{max_depth}] -- Accuracy: {acc * 100.0:.3f}%')
+
+                    if acc > max_acc:
+                        max_acc = acc
+                        max_acc_params = n_estimators, max_depth
+
+    except KeyboardInterrupt:
+        pass
+
+    print(os.linesep + f'Best Accuracy -- {max_acc} Best params -- n_estimators:{max_acc_params[0]}, max_depth:{max_acc_params[1]} ')
+
+def parse_dataset_v2(csv_path):
+    features = pd.read_csv(csv_path)
+    cols = features.columns
+    #print('cols: ' + cols)
+    diction = features.to_dict(orient='index')
+   # print(diction)
+    print(features.describe())
+
+    result = []
+    for key in diction:
+        result.append(diction[key])
+    
+   # print(result)
 
 def prepare_dataset_for_model(ds):
     numeric_inputs = []
@@ -410,16 +465,16 @@ if __name__ == '__main__':
     overridden_hp.Fixed('activation', 'tanh')
     overridden_hp.Int(name='layers', min_value=3, max_value=5, step=1)
 
-    model = run_keras_tuner_on_hypermodel(
-        train_inputs,
-        train_outputs,
-        monitor='val_accuracy',
-        tuner_type='random',
-        max_trials=4096,
-        kfolds=3,
-        epochs=100,
-        overridden_hp=overridden_hp
-    )
+    # model = run_keras_tuner_on_hypermodel(
+    #     train_inputs,
+    #     train_outputs,
+    #     monitor='val_accuracy',
+    #     tuner_type='random',
+    #     max_trials=4096,
+    #     kfolds=3,
+    #     epochs=100,
+    #     overridden_hp=overridden_hp
+    # )
 
     # model = run_single_model(
     #     train_inputs,
@@ -428,7 +483,10 @@ if __name__ == '__main__':
     #     use_dropout=True,
     #     use_regularization=False
     # )
-  
+
+    random_forest_solution(train_inputs, train_outputs)
+    exit()
+
     # make the predictions
     test_ds = parse_dataset(test_csv)
     test_id_offset = int(test_ds[0]['id'])
