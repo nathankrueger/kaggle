@@ -2,7 +2,6 @@ import keras
 import kerastuner as kt
 import numpy as np
 from sklearn.model_selection import KFold
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 import pandas as pd
@@ -24,7 +23,7 @@ DEFAULT_AGE = 0.0
 # avg age in test data: 30.27, with 86 missing entries
 # 68% of train.csv survivors are female, this is a good common-sense baseline
 
-def parse_dataset(csv_path):
+def parse_dataset_from_csv(csv_path):
     result = []
     with open(csv_path, 'r') as fh:
         lines = fh.readlines()
@@ -62,42 +61,65 @@ def parse_dataset(csv_path):
             
     return result
 
-def random_forest_solution(train_inputs, train_outputs):
-    train_features, validation_features, train_labels, validation_labels = train_test_split(
-                                                                    train_inputs,
-                                                                    train_outputs,
-                                                                    test_size=0.25,
-                                                                    random_state=42
-                                                                )
-
-    max_acc = [0.0]
-    max_acc_params = None, None
+def random_forest_solution(train_inputs, train_outputs, test_inputs) -> np.ndarray:
+    accuracy_results = {}
+    num_folds = 4
+    models_to_average = 5
 
     try:
-        for n_estimators in [10,20,30,40,50,100,150,200,250,500,1000,1500,2000,2500,5000,10000]:
-            for max_depth in [2,3,4,5,10,15,20,25]:
-                for train, validation in KFold(n_splits=self.kfolds).split(inputs, outputs):
+        n_estimator_params = [10,15,20,25,30,35,40,50,100,150,200,250,500,1000,1500,2000,2500,5000]
+        random.shuffle(n_estimator_params)
+
+        for max_depth in [4,5,6,7,8,9,10,15,20,25,None]:
+            for n_estimators in n_estimator_params:
+                fold_results = []
+                for train_split, validation_split in KFold(n_splits=num_folds).split(train_inputs, train_outputs):
+                    rando_trees = RandomForestClassifier(
+                        n_estimators=n_estimators,
+                        max_depth=max_depth,
+                        random_state=133735
+                    )
+                    rando_trees.fit(train_inputs[train_split], train_outputs[train_split])
+                    predictions = rando_trees.predict(train_inputs[validation_split])
+
+                    fold_acc = accuracy_score(predictions, train_outputs[validation_split])
+                    fold_results.append(fold_acc)
+                
+                average_acc = np.mean(fold_results)
+                if average_acc in accuracy_results:
+                    accuracy_results[average_acc].append((n_estimators, max_depth))
+                else:
+                    accuracy_results[average_acc] = [(n_estimators, max_depth)]
+                
+                print(f'Average across {num_folds} k-folds: [n_estimators:{n_estimators}, max_depth:{max_depth}] -- Accuracy: {average_acc * 100.0:.3f}%')
+    except KeyboardInterrupt:
+        pass
+
+    model_predictions = []
+    model_cnt = 0
+    for idx, acc_key in enumerate(sorted(accuracy_results, reverse=True)):
+        if model_cnt < models_to_average:
+            for model_params in accuracy_results[acc_key]:
+                if model_cnt < models_to_average:
+                    n_estimators, max_depth = model_params
+                    print(f'Model {model_cnt}: {acc_key} -- params: n_estimators:{n_estimators}, max_depth:{max_depth}')
                     rando_trees = RandomForestClassifier(
                         n_estimators=n_estimators,
                         max_depth=max_depth,
                         random_state=1337
                     )
-                    rando_trees.fit(train_features, train_labels)
-                    rando_trees.predict(validation_features)
+                    rando_trees.fit(train_inputs, train_outputs)
+                    model_predictions.append(rando_trees.predict(test_inputs))
 
-                    predictions = rando_trees.predict(validation_features)
-
-                    acc = accuracy_score(predictions, validation_labels)
-                    print(f'[n_estimators:{n_estimators}, max_depth:{max_depth}] -- Accuracy: {acc * 100.0:.3f}%')
-
-                    if acc > max_acc:
-                        max_acc = acc
-                        max_acc_params = n_estimators, max_depth
-
-    except KeyboardInterrupt:
-        pass
-
-    print(os.linesep + f'Best Accuracy -- {max_acc} Best params -- n_estimators:{max_acc_params[0]}, max_depth:{max_acc_params[1]} ')
+                    model_cnt += 1
+                else:
+                    break
+        else:
+            break
+    
+    model_predictions = np.asarray(model_predictions)
+    model_predictions = np.mean(model_predictions, axis=0)
+    return model_predictions
 
 def parse_dataset_v2(csv_path):
     features = pd.read_csv(csv_path)
@@ -138,7 +160,7 @@ def prepare_dataset_for_model(ds):
             [
                 passenger['pclass'],
                 passenger['sex'],
-                #passenger['age'],
+                passenger['age'],
                 passenger['sibsp'],
                 passenger['parch'],
                 passenger['embarked'],
@@ -150,7 +172,7 @@ def prepare_dataset_for_model(ds):
         )
         numeric_outputs.append(passenger['survived'])
 
-    numeric_outputs = np.array(numeric_outputs)
+    numeric_outputs = np.array(numeric_outputs, dtype='float32')
     numeric_inputs = np.array(numeric_inputs)
 
     return numeric_inputs, numeric_outputs
@@ -167,12 +189,15 @@ def calculate_mean_for_missing_data(ds, key):
 
     return np.mean(vals), num_missing
 
-def generate_output_csv(csv_filename, predictions, offset):
+def generate_output_csv(csv_filename, predictions: np.ndarray, offset):
+    if predictions.ndim > 1:
+        predictions = predictions.squeeze()
+
     # write output csv
     with open(base_dir / csv_filename, 'w') as fh:
         fh.write('PassengerId,Survived\n')
         for idx, pred in enumerate(predictions):
-            fh.write(f'{idx + offset},{1 if pred[0] >= 0.5 else 0}\n')
+            fh.write(f'{idx + offset},{1 if pred >= 0.5 else 0}\n')
 
 class TitanicHyperModel(kt.HyperModel):
     def __init__(self, num_inputs: int, kfolds: int=1):
@@ -274,15 +299,23 @@ class TitanicHyperModel(kt.HyperModel):
 """
 Train a simple model with fixed architecture
 """
-def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_regularization=False, use_dropout=False) -> keras.Model:
+def run_single_model(
+    train_inputs,
+    train_outputs,
+    test_inputs,
+    monitor: str='val_accuracy',
+    use_regularization: bool=False,
+    dropout: float=0.0
+) -> np.ndarray:
+
     # multi-layer perceptron
     x = inputs = keras.Input(shape=(len(train_inputs[0]),), dtype='float32')
     x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
     x = keras.layers.Dense(64, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
     x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
-    x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001 if use_regularization else None))(x)
-    if use_dropout:
-        x = keras.layers.Dropout(0.5)(x)
+    if dropout > 0.0:
+        x = keras.layers.Dropout(dropout)(x)
     outputs = keras.layers.Dense(1, activation='sigmoid')(x)
     model = keras.Model(inputs, outputs)
 
@@ -311,11 +344,11 @@ def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_re
                 ),
                 keras.callbacks.ReduceLROnPlateau(
                     patience=5,
-                    factor=0.6,
+                    factor=0.5,
                     monitor=monitor
                 ),
                 keras.callbacks.EarlyStopping(
-                    patience=50,
+                    patience=30,
                     monitor=monitor
                 )
             ]
@@ -325,7 +358,8 @@ def run_single_model(train_inputs, train_outputs, monitor='val_accuracy', use_re
 
     # load in the best performing model weights
     best_model = keras.models.load_model(model_path)
-    return best_model
+    predictions = best_model.predict(test_inputs)
+    return predictions
 
 """
 Use keras-tuner to sweep across hyperparameter space and determine the best
@@ -335,13 +369,14 @@ See: https://keras.io/guides/keras_tuner/getting_started/
 def run_keras_tuner_on_hypermodel(
     train_inputs,
     train_outputs,
+    test_inputs,
     overridden_hp: kt.HyperParameters=None,
     epochs: int=300,
     kfolds: int=3,
     max_trials: int=400,
     monitor: str='val_accuracy',
     tuner_type: str='random'
-) -> keras.Model:
+) -> np.ndarray:
 
     hypermodel = TitanicHyperModel(len(train_inputs[0]), kfolds=kfolds)
     execution_per_trial = 1
@@ -448,24 +483,36 @@ def run_keras_tuner_on_hypermodel(
     print(os.linesep + 'Evaluating best model...')
     best_model.evaluate(train_inputs, train_outputs)
 
-    return best_model
+    predictions = best_model.predict(test_inputs)
+    return predictions
+
+def average_predicitons(*args):
+    nones_removed = [arg for arg in args if arg is not None]
+    squeezed = [arg.squeeze() if arg.ndim > 1 else arg for arg in nones_removed]
+    return np.mean(squeezed, axis=0)
 
 if __name__ == '__main__':
     # parse & collect the training data in a usable format
-    train_ds = parse_dataset(train_csv)
+    train_ds = parse_dataset_from_csv(train_csv)
     random.seed(1337)
     random.shuffle(train_ds)
-    numeric_inputs, numeric_outputs = prepare_dataset_for_model(train_ds)
+    train_inputs, train_outputs = prepare_dataset_for_model(train_ds)
 
-    # convert training data to float
-    train_inputs = np.array(numeric_inputs).astype('float32')
-    train_outputs = np.array(numeric_outputs).astype('float32')
+    # parse & collect the test data
+    test_ds = parse_dataset_from_csv(test_csv)
+    test_inputs, test_outputs = prepare_dataset_for_model(test_ds)
+    test_id_offset = int(test_ds[0]['id'])
 
-    overridden_hp = kt.HyperParameters()
-    overridden_hp.Fixed('activation', 'tanh')
-    overridden_hp.Int(name='layers', min_value=3, max_value=5, step=1)
+    hyper_model_predictions = None
+    single_model_predictions = None
+    random_forest_predicitons = None
 
-    # model = run_keras_tuner_on_hypermodel(
+    # hyper-model NN which first chooses the best model architecture,
+    # then builds the model, fits it, and generates predicitons
+    # overridden_hp = kt.HyperParameters()
+    # overridden_hp.Fixed('activation', 'tanh')
+    # overridden_hp.Int(name='layers', min_value=3, max_value=5, step=1)
+    # hyper_model_predictions = run_keras_tuner_on_hypermodel(
     #     train_inputs,
     #     train_outputs,
     #     monitor='val_accuracy',
@@ -476,21 +523,21 @@ if __name__ == '__main__':
     #     overridden_hp=overridden_hp
     # )
 
-    # model = run_single_model(
-    #     train_inputs,
-    #     train_outputs,
-    #     monitor='val_accuracy',
-    #     use_dropout=True,
-    #     use_regularization=False
-    # )
+    # single NN model which is fit and generates predicitons
+    single_model_predictions = run_single_model(
+        train_inputs,
+        train_outputs,
+        test_inputs,
+        monitor='val_accuracy',
+        dropout=0.5,
+        use_regularization=False
+    )
 
-    random_forest_solution(train_inputs, train_outputs)
-    exit()
+    # random forest example which ensembles (combines) the results of multiple random forests
+    random_forest_predicitons = random_forest_solution(train_inputs, train_outputs, test_inputs)
 
-    # make the predictions
-    test_ds = parse_dataset(test_csv)
-    test_id_offset = int(test_ds[0]['id'])
-    test_inputs, numeric_outputs = prepare_dataset_for_model(test_ds)
-    print(os.linesep + 'Predicting test outputs...')
-    predictions = model.predict(test_inputs)
-    generate_output_csv('test_submission.csv', predictions, test_id_offset)
+    # averaged predicitons among different methods
+    averaged_predictions = average_predicitons(hyper_model_predictions, single_model_predictions, random_forest_predicitons)
+
+    # save the results
+    generate_output_csv('test_submission.csv', averaged_predictions, test_id_offset)
