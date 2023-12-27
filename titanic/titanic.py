@@ -610,6 +610,7 @@ if __name__ == '__main__':
     # random forest which chooses the best model given hyperparameter tuning
     xgboost_random_forest_predictions = xgboost_random_forest_solution(train_inputs_with_nan, train_outputs_with_nan, test_inputs_with_nan)
 
+    # gradient boosted trees with tensorflow & hyperparameter tuning
     tf_gradient_boosted_trees_predicitons = tf_gradient_boosted_trees_solution(train_inputs_with_nan, train_outputs_with_nan, test_inputs_with_nan)
 
     # averaged predicitons among different methods
