@@ -1,9 +1,11 @@
 import keras
-import kerastuner as kt
+import keras_tuner as kt
+import tensorflow_decision_forests as tfdf
 import numpy as np
 from sklearn.model_selection import KFold
 from sklearn.metrics import accuracy_score
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from xgboost import XGBRFClassifier
 import pandas as pd
 import os
 import random
@@ -13,11 +15,13 @@ base_dir = Path(os.path.dirname(__file__))
 train_csv = base_dir / 'train.csv'
 test_csv = base_dir / 'test.csv'
 model_path = str(base_dir / 'titanic_model')
+xgboost_device = 'cpu'
 
 CABIN_LETTER_DICT = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, None: 8}
 NAME_PREFIX_DICT = {'Mrs.': 1, 'Miss': 2, 'Mr.': 3, 'Dr.': 4, None: 5}
 EMBARKMENT_DICT = {'C': 1, 'Q': 2, 'S': 3, '': 4}
-DEFAULT_AGE = 0.0
+DEFAULT_AGE = float('nan')
+DEFAULT_FARE = float('nan')
 
 # avg age in training data: 29.69, with 177 missing entries
 # avg age in test data: 30.27, with 86 missing entries
@@ -54,14 +58,14 @@ def parse_dataset_from_csv(csv_path):
                 'sibsp': int(row[offset + 5]),
                 'parch': int(row[offset + 6]),
                 'ticket': row[offset + 7],
-                'fare': float(row[offset + 8]) if len(row[offset + 8]) > 0 else None,
+                'fare': float(row[offset + 8]) if len(row[offset + 8]) > 0 else DEFAULT_FARE,
                 'cabin': row[offset + 9],
                 'embarked': EMBARKMENT_DICT[row[offset + 10].strip()]
             })
             
     return result
 
-def random_forest_solution(train_inputs, train_outputs, test_inputs) -> np.ndarray:
+def sklearn_random_forest_solution(train_inputs, train_outputs, test_inputs) -> np.ndarray:
     accuracy_results = {}
     num_folds = 4
     models_to_average = 5
@@ -121,6 +125,62 @@ def random_forest_solution(train_inputs, train_outputs, test_inputs) -> np.ndarr
     model_predictions = np.mean(model_predictions, axis=0)
     return model_predictions
 
+def xgboost_random_forest_solution(train_inputs, train_outputs, test_inputs) -> np.ndarray:
+    num_folds = 4
+    collected_results = {}
+
+    try:
+        for subsample in [0.7,0.75,0.8,0.85,0.9]:
+            for max_depth in [3,4,5,6,7,8,9]:
+                for n_estimators in [1,10,15,20,25,30,40,50,100,150,200,250,500,1000,2000]:
+                    model_acc_results = []
+                    for train_split, validation_split in KFold(n_splits=num_folds).split(train_inputs, train_outputs):
+                        rfc = XGBRFClassifier(
+                            n_estimators=n_estimators,
+                            subsample=subsample,
+                            max_depth=max_depth,
+                            device=xgboost_device
+                        )
+                        rfc.fit(train_inputs[train_split], train_outputs[train_split])
+                        predictions = rfc.predict(train_inputs[validation_split])
+                        fold_acc = accuracy_score(predictions, train_outputs[validation_split])
+                        model_acc_results.append(fold_acc)
+
+                    average_acc = np.mean(model_acc_results)
+                    collected_results[average_acc] = n_estimators, max_depth, subsample
+                    print(f'n_estimators: {n_estimators}, max_depth:{max_depth}, subsample: {subsample} -- Avg. Accuracy for {num_folds} folds: {average_acc * 100:.4f}%')
+
+        best_acc = sorted(collected_results, reverse=True)[0]
+        n_estimators, max_depth, subsample = collected_results[best_acc]
+        print(os.linesep + f'Best Accuracy: {best_acc * 100:.4f}% -- n_estimators: {n_estimators}, max_depth:{max_depth}, subsample: {subsample}')
+    
+    except KeyboardInterrupt:
+        pass
+
+    # fit the model with the best parameters on full training data
+    rfc = XGBRFClassifier(
+        n_estimators=n_estimators,
+        subsample=subsample,
+        max_depth=max_depth,
+        device=xgboost_device
+    )
+    rfc.fit(train_inputs, train_outputs)
+    predictions = rfc.predict(test_inputs)
+
+    return predictions
+
+def tf_gradient_boosted_trees_solution(train_inputs, train_outputs, test_inputs) -> np.ndarray:
+    tuner = tfdf.tuner.RandomSearch(num_trials=50)
+    tuner.choice('max_depth', [2,3,4,5,6,7,8,9,10,20,30])
+    tuner.choice('num_trees', [10,20,30,40,50,100,200,300,500,1000,1500,2000])
+    tuner.choice('subsample', [0.7,0.8,0.85,0.9,1.0])
+    model = tfdf.keras.GradientBoostedTreesModel(tuner=tuner)
+    model.fit(train_inputs, train_outputs, validation_split=0.3)
+    print(model.summary())
+
+    predictions = model.predict(test_inputs)
+    return predictions
+
 def parse_dataset_v2(csv_path):
     features = pd.read_csv(csv_path)
     cols = features.columns
@@ -135,7 +195,7 @@ def parse_dataset_v2(csv_path):
     
    # print(result)
 
-def prepare_dataset_for_model(ds):
+def prepare_dataset_for_model(ds, include_age: bool=False, include_fare: bool=False):
     numeric_inputs = []
     numeric_outputs = []
 
@@ -155,21 +215,28 @@ def prepare_dataset_for_model(ds):
                 if key in passenger['cabin']:
                     name_int = CABIN_LETTER_DICT[key]
                     break
-
-        numeric_inputs.append(
-            [
+        
+        # note: ticket is discarded
+        passenger_features = [
                 passenger['pclass'],
                 passenger['sex'],
-                passenger['age'],
                 passenger['sibsp'],
                 passenger['parch'],
                 passenger['embarked'],
                 name_int,
-                cabin_int,
-                #passenger['ticket'],
-                #passenger['fare']
+                cabin_int
             ]
-        )
+
+        if include_age:
+            passenger_features.append(passenger['age'])
+
+        if include_fare:
+            passenger_features.append(passenger['fare'])
+
+        # build per passenger array of passenger features
+        numeric_inputs.append(passenger_features)
+
+        # outputs are solely 'survived'
         numeric_outputs.append(passenger['survived'])
 
     numeric_outputs = np.array(numeric_outputs, dtype='float32')
@@ -307,15 +374,19 @@ def run_single_model(
     use_regularization: bool=False,
     dropout: float=0.0
 ) -> np.ndarray:
+    # Note: https://www.pinecone.io/learn/batch-layer-normalization/
 
     # multi-layer perceptron
     x = inputs = keras.Input(shape=(len(train_inputs[0]),), dtype='float32')
     x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Dense(64, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
+    x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
     if dropout > 0.0:
-        x = keras.layers.Dropout(dropout)(x)
+         x = keras.layers.Dropout(dropout)(x)
     outputs = keras.layers.Dense(1, activation='sigmoid')(x)
     model = keras.Model(inputs, outputs)
 
@@ -337,28 +408,23 @@ def run_single_model(
             epochs=400,
             callbacks=[
                 keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs')),
-                keras.callbacks.ModelCheckpoint(
-                    save_best_only=True,
-                    filepath=model_path,
-                    monitor=monitor
-                ),
                 keras.callbacks.ReduceLROnPlateau(
                     patience=5,
                     factor=0.5,
                     monitor=monitor
                 ),
                 keras.callbacks.EarlyStopping(
-                    patience=30,
-                    monitor=monitor
+                    patience=50,
+                    monitor=monitor,
+                    restore_best_weights=True
                 )
             ]
         )
     except KeyboardInterrupt:
         print(os.linesep)
 
-    # load in the best performing model weights
-    best_model = keras.models.load_model(model_path)
-    predictions = best_model.predict(test_inputs)
+    # best weights are used to make predictions
+    predictions = model.predict(test_inputs)
     return predictions
 
 """
@@ -497,15 +563,19 @@ if __name__ == '__main__':
     random.seed(1337)
     random.shuffle(train_ds)
     train_inputs, train_outputs = prepare_dataset_for_model(train_ds)
+    train_inputs_with_nan, train_outputs_with_nan = prepare_dataset_for_model(train_ds, include_age=True, include_fare=True)
 
     # parse & collect the test data
     test_ds = parse_dataset_from_csv(test_csv)
-    test_inputs, test_outputs = prepare_dataset_for_model(test_ds)
+    test_inputs, _ = prepare_dataset_for_model(test_ds)
+    test_inputs_with_nan, _ = prepare_dataset_for_model(test_ds, include_age=True, include_fare=True)
     test_id_offset = int(test_ds[0]['id'])
 
     hyper_model_predictions = None
     single_model_predictions = None
-    random_forest_predicitons = None
+    sklearn_random_forest_predicitons = None
+    xgboost_random_forest_predictions = None
+    tf_gradient_boosted_trees_predicitons = None
 
     # hyper-model NN which first chooses the best model architecture,
     # then builds the model, fits it, and generates predicitons
@@ -515,6 +585,7 @@ if __name__ == '__main__':
     # hyper_model_predictions = run_keras_tuner_on_hypermodel(
     #     train_inputs,
     #     train_outputs,
+    #     test_inputs,
     #     monitor='val_accuracy',
     #     tuner_type='random',
     #     max_trials=4096,
@@ -529,15 +600,26 @@ if __name__ == '__main__':
         train_outputs,
         test_inputs,
         monitor='val_accuracy',
-        dropout=0.5,
+        dropout=0.0,
         use_regularization=False
     )
 
     # random forest example which ensembles (combines) the results of multiple random forests
-    random_forest_predicitons = random_forest_solution(train_inputs, train_outputs, test_inputs)
+    sklearn_random_forest_predicitons = sklearn_random_forest_solution(train_inputs, train_outputs, test_inputs)
+
+    # random forest which chooses the best model given hyperparameter tuning
+    xgboost_random_forest_predictions = xgboost_random_forest_solution(train_inputs_with_nan, train_outputs_with_nan, test_inputs_with_nan)
+
+    tf_gradient_boosted_trees_predicitons = tf_gradient_boosted_trees_solution(train_inputs_with_nan, train_outputs_with_nan, test_inputs_with_nan)
 
     # averaged predicitons among different methods
-    averaged_predictions = average_predicitons(hyper_model_predictions, single_model_predictions, random_forest_predicitons)
+    averaged_predictions = average_predicitons(
+                                hyper_model_predictions,
+                                single_model_predictions,
+                                sklearn_random_forest_predicitons,
+                                xgboost_random_forest_predictions,
+                                tf_gradient_boosted_trees_predicitons
+                            )
 
     # save the results
     generate_output_csv('test_submission.csv', averaged_predictions, test_id_offset)
