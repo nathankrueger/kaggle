@@ -40,8 +40,11 @@ def get_dataset(csv_path):
     ds['GarageYrBlt'].fillna(0, inplace=True)
     ds['MasVnrArea'].fillna(ds['MasVnrArea'].mean(), inplace=True)
 
+    # create new features
+    ds['YearsSinceRemodel'] = ds['YearRemodAdd'] - ds['YearBuilt']
+
     # drop all rows with missing values (in any column) -- remove rows with missing 'Electrical' column
-    ds = ds.dropna()
+    #ds = ds.dropna()
 
     # convert string objects to integer category labels
     object_cols = ds.columns.to_series().groupby(ds.dtypes).groups[np.dtype('O')]
@@ -50,74 +53,9 @@ def get_dataset(csv_path):
         ds[col] = labeler.fit_transform(ds[col])
 
     ds = ds.astype('float32')
-
-    print(ds.info())
     return ds
 
-def tensorflow_solution():
-    train_ds = get_dataset(TRAIN_CSV)
-    train_ds_noid = train_ds.drop('Id', axis=1)
-    train_ds_noid = train_ds_noid.drop('SalePrice', axis=1)
-    train_sales_prices = train_ds.get('SalePrice').to_numpy()
-    train_data = train_ds_noid.to_numpy()
-    print(train_data.shape)
-
-    # normalize the data
-    train_data_mean = train_data.mean(axis=0)
-    train_data_std = train_data.std(axis=0)
-    train_data -= train_data_mean
-    train_data /= train_data_std
-
-    activation = 'tanh'
-    model = keras.models.Sequential(
-        [
-            keras.layers.Input(shape=(train_data.shape[1],), dtype='float32'),
-            keras.layers.Dense(1024, activation=activation),
-            keras.layers.Dense(512, activation=activation),
-            keras.layers.Dense(128, activation=activation),
-            keras.layers.Dense(1, activation=None)
-        ]
-    )
-    model.compile(
-        optimizer=keras.optimizers.RMSprop(learning_rate=0.1),
-        loss='mse',
-        metrics=['mae']
-    )
-
-    print(model.summary())
-
-    try:
-        model.fit(
-            x=train_data,
-            y=train_sales_prices,
-            batch_size=64,
-            validation_split=0.3,
-            epochs=300,
-            callbacks=[
-                keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs')),
-                keras.callbacks.ReduceLROnPlateau(
-                    patience=6,
-                    factor=0.75
-                ),
-                keras.callbacks.EarlyStopping(
-                    patience=30,
-                    restore_best_weights=True
-                )
-            ]
-        )
-    except KeyboardInterrupt:
-        pass
-
-    test_ds = get_dataset(TEST_CSV)
-    test_ds_noid = test_ds.drop('Id', axis=1)
-    test_data = test_ds_noid.to_numpy()
-    test_data -= train_data_mean
-    test_data /= train_data_std
-
-    predicitons = model.predict(test_data)
-    print(predicitons)
-
-if __name__ == '__main__':
+def explore_dataset(path: str):
     ds = pd.read_csv(TRAIN_CSV)
 
     # Provides statistical metrics like mean, stddev, min, max, percentiles, etc
@@ -139,4 +77,144 @@ if __name__ == '__main__':
     #feature = ds.get('OpenPorchSF')
     #print(feature)
 
+def keep_only(ds: pd.DataFrame, keep_columns: list) -> pd.DataFrame:
+    all_cols = ds.columns.to_list()
+    result = ds
+    for col in all_cols:
+        if not col in keep_columns:
+            result = result.drop(col, axis=1)
+    
+    return result
+
+def tensorflow_solution():
+    features_to_model = [
+        'Neighborhood',
+
+        # Sale details
+        'SaleType',
+        'MSZoning',
+
+        # Quality
+        'KitchenQual',
+        'HeatingQC',
+        'GarageQual',
+        'CentralAir',
+        'OverallQual',
+        'OverallCond',
+        'ExterQual',
+        'ExterCond',
+        'PoolQC',
+        'FireplaceQu',
+
+        # Basic features of house
+        'BldgType',
+        'LotConfig',
+        'HouseStyle',
+        'Bedroom',
+        'YearBuilt',
+        'YearsSinceRemodel',
+        'LotArea',
+        'BedroomAbvGr',
+        'Fireplaces',
+        'GrLivArea',
+        'RoofStyle',
+        'Condition1',
+        'Condition2',
+        'LotConfig',
+        'LotShape',
+        'LandContour',
+        'Street',
+        'LotFrontage'
+    ]
+
+    # SalePrice is the target / expected output, we need it in every case.
+    features_to_model += ['SalePrice']
+
+    train_ds = get_dataset(TRAIN_CSV)
+    train_ds = keep_only(train_ds, features_to_model)
+    print('Train dataset info: ', end='')
+    train_ds.info()
+
+    train_sales_prices = train_ds.get('SalePrice').to_numpy()
+    train_ds_no_targets = train_ds.drop('SalePrice', axis=1)
+
+    # create the numpy array for the test data, being careful to omit the targets
+    train_data = train_ds_no_targets.to_numpy()
+    print('Training data numpy shape: ' + str(train_data.shape))
+
+    # normalize the data
+    train_data_mean = train_data.mean(axis=0)
+    train_data_std = train_data.std(axis=0)
+    train_data -= train_data_mean
+    train_data /= train_data_std
+
+    # build a simple feed-forward net
+    activation = 'tanh'
+    model = keras.models.Sequential(
+        [
+            keras.layers.Input(shape=(train_data.shape[1],), dtype='float32'),
+            keras.layers.Dense(1024, activation=activation),
+            keras.layers.BatchNormalization(axis=1),
+            keras.layers.Dense(256, activation=activation),
+            keras.layers.BatchNormalization(axis=1),
+            keras.layers.Dense(128, activation=activation),
+            keras.layers.Dropout(0.6),
+            keras.layers.Dense(1, activation='linear')
+        ]
+    )
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=75),
+        loss='mse',
+        metrics=['mae']
+    )
+
+    print(model.summary())
+
+    # train the model
+    try:
+        model.fit(
+            x=train_data,
+            y=train_sales_prices,
+            batch_size=64,
+            validation_split=0.3,
+            epochs=5000,
+            callbacks=[
+                keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs')),
+                keras.callbacks.ReduceLROnPlateau(
+                    patience=8,
+                    factor=0.75
+                ),
+                keras.callbacks.EarlyStopping(
+                    patience=500,
+                    restore_best_weights=True
+                )
+            ]
+        )
+    except KeyboardInterrupt:
+        pass
+
+    # prepare the test data
+    test_ds = get_dataset(TEST_CSV)
+    test_ds = keep_only(test_ds, features_to_model)
+    test_data = test_ds.to_numpy()
+    print('Test data numpy shape: ' + str(test_data.shape))
+
+    # normalize the test data, using the factor as the training data
+    test_data -= train_data_mean
+    test_data /= train_data_std
+
+    # inference
+    predicitons = model.predict(test_data)
+
+    # generate the prediction submission
+    output_offset = 1461
+    with open(base_dir / 'housing_submission.csv', 'w') as output_file:
+        # write the expected header
+        output_file.write(f'Id,SalePrice{os.linesep}')
+
+        # write the predicitons for each house
+        for predidx in range(predicitons.shape[0]):
+            output_file.write(f'{predidx + output_offset},{predicitons[predidx][0]}{os.linesep}')
+
+if __name__ == '__main__':
     tensorflow_solution()
