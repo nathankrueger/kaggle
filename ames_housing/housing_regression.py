@@ -37,20 +37,28 @@ def get_dataset(csv_path):
 
     # handle 'na' numeric values
     ds['LotFrontage'].fillna(ds['LotFrontage'].mean(), inplace=True)
-    ds['GarageYrBlt'].fillna(0, inplace=True)
+    ds['GarageYrBlt'].fillna(ds['YearBuilt'], inplace=True)
     ds['MasVnrArea'].fillna(ds['MasVnrArea'].mean(), inplace=True)
-
+    ds['BsmtFinSF1'].fillna(0.0, inplace=True)
+    ds['BsmtFinSF2'].fillna(0.0, inplace=True)
+    ds['BsmtUnfSF'].fillna(0.0, inplace=True)
+    ds['TotalBsmtSF'].fillna(0.0, inplace=True)
+    ds['BsmtFullBath'].fillna(0.0, inplace=True)
+    ds['BsmtHalfBath'].fillna(0.0, inplace=True)
+    ds['GarageCars'].fillna(0.0, inplace=True)
+    ds['GarageArea'].fillna(0.0, inplace=True)
+    
     # create new features
     ds['YearsSinceRemodel'] = ds['YearRemodAdd'] - ds['YearBuilt']
-
-    # drop all rows with missing values (in any column) -- remove rows with missing 'Electrical' column
-    #ds = ds.dropna()
 
     # convert string objects to integer category labels
     object_cols = ds.columns.to_series().groupby(ds.dtypes).groups[np.dtype('O')]
     for col in object_cols:
         labeler = preprocessing.LabelEncoder()
         ds[col] = labeler.fit_transform(ds[col])
+
+    # fill missing Electrical value for row(s) with missing value
+    ds['Electrical'].fillna(ds['Electrical'].mode(), inplace=True)
 
     ds = ds.astype('float32')
     return ds
@@ -131,7 +139,7 @@ def tensorflow_solution():
     features_to_model += ['SalePrice']
 
     train_ds = get_dataset(TRAIN_CSV)
-    train_ds = keep_only(train_ds, features_to_model)
+    #train_ds = keep_only(train_ds, features_to_model)
     print('Train dataset info: ', end='')
     train_ds.info()
 
@@ -153,17 +161,19 @@ def tensorflow_solution():
     model = keras.models.Sequential(
         [
             keras.layers.Input(shape=(train_data.shape[1],), dtype='float32'),
-            keras.layers.Dense(1024, activation=activation),
+            keras.layers.Dense(512, activation=activation),
             keras.layers.BatchNormalization(axis=1),
+            keras.layers.Dropout(0.25),
             keras.layers.Dense(256, activation=activation),
             keras.layers.BatchNormalization(axis=1),
+            keras.layers.Dropout(0.25),
             keras.layers.Dense(128, activation=activation),
-            keras.layers.Dropout(0.6),
+            keras.layers.Dropout(0.25),
             keras.layers.Dense(1, activation='linear')
         ]
     )
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=75),
+        optimizer=keras.optimizers.Adam(learning_rate=100),
         loss='mse',
         metrics=['mae']
     )
@@ -176,8 +186,8 @@ def tensorflow_solution():
             x=train_data,
             y=train_sales_prices,
             batch_size=64,
-            validation_split=0.3,
-            epochs=5000,
+            validation_split=0.25,
+            epochs=2000,
             callbacks=[
                 keras.callbacks.TensorBoard(str(base_dir / 'tensorboard_logs')),
                 keras.callbacks.ReduceLROnPlateau(
@@ -185,7 +195,7 @@ def tensorflow_solution():
                     factor=0.75
                 ),
                 keras.callbacks.EarlyStopping(
-                    patience=500,
+                    patience=200,
                     restore_best_weights=True
                 )
             ]
@@ -195,13 +205,16 @@ def tensorflow_solution():
 
     # prepare the test data
     test_ds = get_dataset(TEST_CSV)
-    test_ds = keep_only(test_ds, features_to_model)
+    #test_ds = keep_only(test_ds, features_to_model)
     test_data = test_ds.to_numpy()
     print('Test data numpy shape: ' + str(test_data.shape))
 
     # normalize the test data, using the factor as the training data
     test_data -= train_data_mean
     test_data /= train_data_std
+
+    #nan_rows = test_ds.isna().any(axis=0)
+    #print(nan_rows)
 
     # inference
     predicitons = model.predict(test_data)
