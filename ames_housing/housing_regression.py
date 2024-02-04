@@ -1,11 +1,13 @@
-import tensorflow as tf
 import keras
 import numpy as np
 import pandas as pd
 from sklearn import preprocessing
 from pathlib import Path
+import seaborn as sns
+import matplotlib.pyplot as plt
 import os
 
+# prevent ellipsis when describing the data
 pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
 
@@ -14,7 +16,7 @@ base_dir = Path(os.path.dirname(__file__))
 TEST_CSV = base_dir / 'test.csv'
 TRAIN_CSV = base_dir / 'train.csv'
 
-def get_dataset(csv_path):
+def get_dataset(csv_path) -> pd.DataFrame:
     ds = pd.read_csv(csv_path)
 
     # handle 'na' categorical features
@@ -63,27 +65,32 @@ def get_dataset(csv_path):
     ds = ds.astype('float32')
     return ds
 
-def explore_dataset(path: str):
-    ds = pd.read_csv(TRAIN_CSV)
-
-    # Provides statistical metrics like mean, stddev, min, max, percentiles, etc
+def explore_dataset(ds: pd.DataFrame):
+    # provides statistical metrics like mean, stddev, min, max, percentiles, etc
     print("Describing the data:")
     print(ds.describe())
 
-    # Provides information about colums and their types -- f
+    # provides information about colums and their types -- f
     print("Dataset Info:")
     print(ds.info())
 
-    # Report on the number of rows with missing data for each column, filtering those that 
+    # report on the number of rows with missing data for each column, filtering those that 
     # do not have any rows with missing data.
     missing_data = ds.isnull().sum()
     missing_data = missing_data[missing_data>0]
     print(missing_data.sort_values(ascending=False))
 
-    #print(ds.Alley)
+    # access & print some specifics
+    print(ds.Alley)
     print(type(ds.get('Alley')[1453]))
-    #feature = ds.get('OpenPorchSF')
-    #print(feature)
+    feature = ds.get('OpenPorchSF')
+    print(feature)
+
+    # show a heatmap to visualize feature correlations
+    plt.figure(figsize=(18, 14))
+    heatmap = sns.heatmap(ds.corr(), vmin=-1, vmax=1, xticklabels=True, yticklabels=True, cmap='PiYG')
+    heatmap.set_title('Correlation Heatmap', fontdict={'fontsize':20}, pad=12)
+    plt.show()
 
 def keep_only(ds: pd.DataFrame, keep_columns: list) -> pd.DataFrame:
     all_cols = ds.columns.to_list()
@@ -230,4 +237,6 @@ def tensorflow_solution():
             output_file.write(f'{predidx + output_offset},{predicitons[predidx][0]}{os.linesep}')
 
 if __name__ == '__main__':
+    #ds = get_dataset(TRAIN_CSV)
+    #explore_dataset(ds)
     tensorflow_solution()
