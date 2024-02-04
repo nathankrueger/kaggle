@@ -372,19 +372,20 @@ def run_single_model(
     test_inputs,
     monitor: str='val_accuracy',
     use_regularization: bool=False,
-    dropout: float=0.0
+    dropout: float=0.0,
+    activation: str='tanh'
 ) -> np.ndarray:
     # Note: https://www.pinecone.io/learn/batch-layer-normalization/
 
     # multi-layer perceptron
     x = inputs = keras.Input(shape=(len(train_inputs[0]),), dtype='float32')
-    x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(128, activation=activation, kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
     x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.Dense(128, activation='tanh', kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(128, activation=activation, kernel_regularizer=keras.regularizers.l1(0.002) if use_regularization else None)(x)
     x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.Dense(64, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
+    x = keras.layers.Dense(64, activation=activation, kernel_regularizer=keras.regularizers.l2(0.002) if use_regularization else None)(x)
     x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.Dense(32, activation='tanh', kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
+    x = keras.layers.Dense(32, activation=activation, kernel_regularizer=keras.regularizers.l2(0.001) if use_regularization else None)(x)
     if dropout > 0.0:
          x = keras.layers.Dropout(dropout)(x)
     outputs = keras.layers.Dense(1, activation='sigmoid')(x)
@@ -601,7 +602,8 @@ if __name__ == '__main__':
         test_inputs,
         monitor='val_accuracy',
         dropout=0.0,
-        use_regularization=False
+        use_regularization=False,
+        activation='leaky_relu'
     )
 
     # random forest example which ensembles (combines) the results of multiple random forests
