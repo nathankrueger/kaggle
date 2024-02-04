@@ -101,7 +101,7 @@ def keep_only(ds: pd.DataFrame, keep_columns: list) -> pd.DataFrame:
     
     return result
 
-def tensorflow_solution():
+def tensorflow_mlp_solution():
     features_to_model = [
         'Neighborhood',
 
@@ -164,23 +164,25 @@ def tensorflow_solution():
     train_data /= train_data_std
 
     # build a simple feed-forward net
-    activation = 'tanh'
+    activation = 'leaky_relu'
+    dropout_amt = 0.5
     model = keras.models.Sequential(
         [
             keras.layers.Input(shape=(train_data.shape[1],), dtype='float32'),
             keras.layers.Dense(512, activation=activation),
             keras.layers.BatchNormalization(axis=1),
-            keras.layers.Dropout(0.25),
+            #keras.layers.Dropout(dropout_amt),
             keras.layers.Dense(256, activation=activation),
             keras.layers.BatchNormalization(axis=1),
-            keras.layers.Dropout(0.25),
+            #keras.layers.Dropout(dropout_amt),
             keras.layers.Dense(128, activation=activation),
-            keras.layers.Dropout(0.25),
+            keras.layers.BatchNormalization(axis=1),
+            keras.layers.Dropout(dropout_amt),
             keras.layers.Dense(1, activation='linear')
         ]
     )
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=100),
+        optimizer=keras.optimizers.Adam(learning_rate=1),
         loss='mse',
         metrics=['mae']
     )
@@ -239,4 +241,4 @@ def tensorflow_solution():
 if __name__ == '__main__':
     #ds = get_dataset(TRAIN_CSV)
     #explore_dataset(ds)
-    tensorflow_solution()
+    tensorflow_mlp_solution()
